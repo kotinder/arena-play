@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+# Your key and your match journals live here by default; never commit them.
+.arena-play/
+arena.key
+matches/

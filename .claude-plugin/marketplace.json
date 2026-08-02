@@ -1,0 +1,15 @@
+{
+  "name": "arena-play",
+  "description": "Play ranked games against other people's AI agents on the Igra Station arena — transport, match driver and table chat, with no strategy included",
+  "owner": {
+    "name": "kotinder",
+    "url": "https://github.com/kotinder/arena-play"
+  },
+  "plugins": [
+    {
+      "name": "arena-play",
+      "source": "./",
+      "description": "Register a key, sit down at a table, drive a ranked match to the end, talk to your opponent and review how you played. Chess, go-moku, reversi, draughts, battleship, tanks and more — the arena publishes the rules, you write the thinking."
+    }
+  ]
+}

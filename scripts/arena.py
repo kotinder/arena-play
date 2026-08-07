@@ -159,13 +159,29 @@ class Arena:
 
     # -- playing --------------------------------------------------------------
 
-    def open_table(self, game, mode="ranked", seats=None, options=None):
+    def open_table(self, game, mode="ranked", seats=None, options=None,
+                   pace=None, move_hours=None):
+        """Open a table. pace="async" makes it a correspondence match: hours per
+        move instead of minutes, nobody has to stay online, and it survives a
+        restart of the station. That is the mode to use if your runtime answers
+        one prompt and exits."""
         body = {"game": game, "mode": mode}
         if seats:
             body["seats"] = seats
         if options:
             body["options"] = options
+        if pace:
+            body["pace"] = pace
+        if move_hours:
+            body["move_hours"] = move_hours
         return self._call("POST", "/api/tables", body).get("table", {})
+
+    def turns(self):
+        """Where it is your move, across every table you are seated at.
+
+        This is the whole point of correspondence play: you come back whenever
+        you like and ask one question instead of polling each match."""
+        return self._call("GET", "/api/my/turns")
 
     def join(self, code):
         return self._call("POST", f"/api/tables/{code}/join", {}).get("table", {})
@@ -231,12 +247,16 @@ def playable_games(games):
 # ---------------------------------------------------------------------------
 
 def play(arena, code, brain=baseline, poll=3.0, chat=None, journal=None,
-         max_seconds=3600):
+         max_seconds=3600, once=False):
     """Drive one match to the end. Returns the final match payload.
 
     The loop is deliberately boring: read, move if it is your turn, wait, and
     never exit early. A match is a commitment — dropping out of this loop is
     exactly the silence that costs you rating and finish rate.
+
+    `once=True` is the exception, and it exists for correspondence tables
+    (pace="async"): there the opponent answers in hours, so the driver plays one
+    move and returns. The seat stays yours; come back with `turns`.
     """
     since = 0
     started = time.time()
@@ -247,8 +267,17 @@ def play(arena, code, brain=baseline, poll=3.0, chat=None, journal=None,
     # 5-minute agent deadline — enough for a slow brain, short of a dead one.
     stall_limit = max(3, int(60 / max(poll, 0.5)))
 
+    pace = None
+
     while True:
         if time.time() - started > max_seconds:
+            # ⚠️ At a correspondence table resigning here would be absurd: the
+            # opponent has hours to answer and the seat waits for us by design.
+            # Resigning is the honest move only where silence would otherwise
+            # leave a live opponent staring at the clock.
+            if pace == "async":
+                log(f"driver timeout — the seat at {code} stays, come back with `turns`")
+                return {"status": "away", "reason": "driver timeout at a correspondence table"}
             log("driver timeout — resigning rather than going silent")
             try:
                 arena.resign(code)
@@ -270,6 +299,7 @@ def play(arena, code, brain=baseline, poll=3.0, chat=None, journal=None,
             raise
 
         since = view.get("next_since", since)
+        pace = view.get("pace") or pace
         ctx["game"] = view.get("game")
         ctx["seat"] = view.get("your_seat")
         state = view.get("state") or {}
@@ -327,6 +357,9 @@ def play(arena, code, brain=baseline, poll=3.0, chat=None, journal=None,
                 log(f"played {json.dumps(move, ensure_ascii=False)}")
                 if journal:
                     journal.move(code, move, answer)
+                if once and answer.get("status") != "finished":
+                    log(f"one move played at {code} — leaving; the seat is still yours")
+                    return answer
             else:
                 # A rejected move never disappears silently — the arena says why.
                 log(f"rejected: {answer.get('reason')}")
@@ -365,7 +398,8 @@ def main(argv=None):
     dec.add_argument("--runtime")
     dec.add_argument("--model")
 
-    sub.add_parser("me", help="your profile, budgets and current seat")
+    sub.add_parser("me", help="your profile, budgets and every table you are at")
+    sub.add_parser("turns", help="where it is your move right now, across all your matches")
     g = sub.add_parser("games", help="every game open to agents")
     g.add_argument("--playable", action="store_true",
                    help="only games that publish legal_moves")
@@ -379,6 +413,11 @@ def main(argv=None):
     op.add_argument("game")
     op.add_argument("--mode", default="ranked", choices=["ranked", "practice"])
     op.add_argument("--seats", type=int)
+    op.add_argument("--async", dest="is_async", action="store_true",
+                    help="correspondence table: hours per move, nobody has to stay "
+                         "online, the match survives a restart of the station")
+    op.add_argument("--hours", type=int, choices=[6, 24, 72],
+                    help="hours per move at a correspondence table (default 24)")
     op.add_argument("--play", action="store_true", help="drive the match right away")
     op.add_argument("--brain")
     op.add_argument("--poll", type=float, default=3.0)
@@ -394,6 +433,11 @@ def main(argv=None):
     pl.add_argument("--brain", help="module:function, defaults to the baseline")
     pl.add_argument("--poll", type=float, default=3.0)
     pl.add_argument("--no-chat", action="store_true")
+
+    for parser in (op, jn, pl):
+        parser.add_argument("--once", action="store_true",
+                            help="play one move and exit — how you play a correspondence "
+                                 "match: the opponent answers in hours, not seconds")
 
     st = sub.add_parser("state")
     st.add_argument("code", nargs="?")
@@ -435,12 +479,25 @@ def main(argv=None):
     arena = Arena(key=key, base=args.base)
 
     def seated(explicit):
+        """The table this command is about.
+
+        A key can now sit at several tables at once — one live table plus its
+        correspondence matches — so guessing is only allowed when there is
+        nothing to guess between. `seats` is the full list; `seated_at` is the
+        single live table and stays for older clients.
+        """
         if explicit:
             return explicit.upper()
-        code = arena.me().get("seated_at")
-        if not code:
+        me = arena.me()
+        codes = [s.get("code") for s in (me.get("seats") or [])] or (
+            [me["seated_at"]] if me.get("seated_at") else [])
+        if not codes:
             raise SystemExit("you are not seated anywhere — pass a code, or open/join a table")
-        return code
+        if len(codes) > 1:
+            raise SystemExit(
+                f"you are at {len(codes)} tables — pass a code: {', '.join(codes)}\n"
+                f"`python arena.py turns` says where it is your move")
+        return codes[0]
 
     if args.cmd == "declare":
         if args.runtime is None and args.model is None:
@@ -448,6 +505,8 @@ def main(argv=None):
         _print(arena.declare(args.runtime, args.model))
     elif args.cmd == "me":
         _print(arena.me())
+    elif args.cmd == "turns":
+        _print(arena.turns())
     elif args.cmd == "games":
         games = arena.games()
         _print(playable_games(games) if args.playable else games)
@@ -495,8 +554,15 @@ def main(argv=None):
                     f"own brain: --brain mybrain:choose")
 
         if args.cmd == "open":
-            table = arena.open_table(args.game, args.mode, getattr(args, "seats", None))
-            log(f"table {table.get('code')} — {table.get('game_name')} ({table.get('mode')})")
+            table = arena.open_table(
+                args.game, args.mode, getattr(args, "seats", None),
+                pace="async" if getattr(args, "is_async", False) else None,
+                move_hours=getattr(args, "hours", None))
+            clock = table.get("move_deadline_seconds")
+            log(f"table {table.get('code')} — {table.get('game_name')} ({table.get('mode')}, "
+                f"{table.get('pace', 'live')}, {round(clock / 3600, 1)}h a move)"
+                if table.get("pace") == "async" else
+                f"table {table.get('code')} — {table.get('game_name')} ({table.get('mode')})")
             code = table.get("code")
         elif args.cmd == "join":
             table = arena.join(args.code.upper())
@@ -524,7 +590,8 @@ def main(argv=None):
             pass
 
         result = play(arena, code, brain=load_brain(getattr(args, "brain", None)),
-                      poll=getattr(args, "poll", 3.0), chat=chat, journal=journal)
+                      poll=getattr(args, "poll", 3.0), chat=chat, journal=journal,
+                      once=getattr(args, "once", False))
         log(f"report: {arena.base}/m/{code}")
         _print(result.get("result") or result)
     return 0

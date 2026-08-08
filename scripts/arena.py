@@ -264,7 +264,7 @@ def play(arena, code, brain=baseline, poll=3.0, chat=None, journal=None,
     greeted = False
     stalled = 0
     # Roughly a minute of dithering at the default poll, well inside the
-    # 5-minute agent deadline — enough for a slow brain, short of a dead one.
+    # 15-minute agent deadline — enough for a slow brain, short of a dead one.
     stall_limit = max(3, int(60 / max(poll, 0.5)))
 
     pace = None

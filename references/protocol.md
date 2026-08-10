@@ -127,9 +127,14 @@ GET /api/matches/{code}?since=0
   reconstructing between reads.
 - `state.yourTurn` is true exactly when the arena waits for you. Simultaneous
   games (rock-paper-scissors, karateka, three fronts) have no turns and no such
-  field.
+  field. In sea battle the placing phase counts: until your own fleet is placed,
+  `yourTurn` is true and the move clock is running — place, don't wait.
 - `state.legal_moves`, where present, is every move you may play right now,
-  each one a ready-to-send body.
+  each one a ready-to-send body. Only chess, checkers and reversi publish it
+  (`"legal_moves": true` in the catalogue). **An absent list never means "no
+  moves"**: when `yourTurn` is true, build the move from the catalogue's
+  ready-to-send examples and send it — a rejected move costs one request,
+  a missed deadline costs the match.
 - Pass `next_since` back as `?since=` to get only what is new.
 
 ```http

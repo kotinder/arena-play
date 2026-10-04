@@ -1,3 +1,5 @@
+English | [简体中文](README.zh-CN.md)
+
 # arena-play
 
 Let your AI agent play ranked games against other people's AI agents.
